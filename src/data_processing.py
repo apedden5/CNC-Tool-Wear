@@ -200,3 +200,78 @@ def normalize_filtered():
         df_scaled.to_csv(out_path, index=False)
 
         print(f"Experiment {i:02d} normalized → {out_path.name}")
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+WINDOW_SIZE = 10
+TRAIN_EXPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+VAL_EXPS   = [13, 14]
+TEST_EXPS  = [15, 16, 17, 18]
+
+
+def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_col="tool_condition"):
+    rows = []
+
+    for i in exp_ids:
+        f = norm_dir / f"experiment_{i:02d}_normalized.csv"
+        df = pd.read_csv(f)
+
+        if "time_ms" in df.columns:
+            df = df.sort_values("time_ms")
+
+        feats = df[feature_cols].values
+        labels = df[target_col].values
+        n = len(df)
+
+        # precompute column names once (feat_t0, feat_t1, ...)
+        win_feature_cols = [f"{feat}_t{t}" for t in range(window_size) for feat in feature_cols]
+
+        for start in range(0, n - window_size + 1):
+            end = start + window_size
+            window_feats = feats[start:end, :]                   # (W, F)
+            flat = window_feats.reshape(-1)                      # length W*F
+
+            row = dict(zip(win_feature_cols, flat))
+            row[target_col] = labels[end - 1]                    # label = last step
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def make_windowed_datasets():
+    base_dir = Path(__file__).resolve().parents[1]
+    norm_dir = base_dir / "data" / "data_normalized"
+    out_dir = base_dir / "data" / "data_windowed_csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- infer common feature columns across ALL normalized experiments ---
+    dfs = []
+    for i in range(1, 19):
+        f = norm_dir / f"experiment_{i:02d}_normalized.csv"
+        dfs.append(pd.read_csv(f))
+
+    common_cols = set(dfs[0].columns)
+    for df in dfs[1:]:
+        common_cols &= set(df.columns)
+
+    drop_cols = {"tool_condition", "experiment_id", "time_ms"}
+    feature_cols = [c for c in dfs[0].columns if c in common_cols and c not in drop_cols]
+
+    train_df = _windows_to_csv_rows(TRAIN_EXPS, norm_dir, WINDOW_SIZE, feature_cols)
+    val_df   = _windows_to_csv_rows(VAL_EXPS,   norm_dir, WINDOW_SIZE, feature_cols)
+    test_df  = _windows_to_csv_rows(TEST_EXPS,  norm_dir, WINDOW_SIZE, feature_cols)
+
+    train_path = out_dir / f"train_windows_w{WINDOW_SIZE}.csv"
+    val_path   = out_dir / f"val_windows_w{WINDOW_SIZE}.csv"
+    test_path  = out_dir / f"test_windows_w{WINDOW_SIZE}.csv"
+
+    train_df.to_csv(train_path, index=False)
+    val_df.to_csv(val_path, index=False)
+    test_df.to_csv(test_path, index=False)
+
+    print("Saved:")
+    print("  ", train_path)
+    print("  ", val_path)
+    print("  ", test_path)
