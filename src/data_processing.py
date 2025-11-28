@@ -43,17 +43,49 @@ def experiment_encoding():
     print("All experiments encoded successfully")
 
 # The method to normalize, remove missing values, and smooth the overall data.
-def data_cleaning():
+
+def checking_missing_values():
     base_dir = Path(__file__).resolve().parents[1]
 
     data_dir = base_dir / "data/data_id"
     out_dir = base_dir / "data/data_cleaned"
-
     os.makedirs(out_dir, exist_ok=True)
 
-    # Using linear interpolation to fill missing values
+    ##### Checking for missing values across all experiments #####
+    total_missing_all = 0  # accumulator
+
     for i in range(1, 19):
         exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
         df = pd.read_csv(exp_file)
 
-        df = df.interpolate(method="linear", limit_direction="both")
+        # Count missing values for this experiment
+        total_missing_all += df.isnull().sum().sum()
+
+    # Final summary print
+    print(f"\nTotal missing values across all experiments: {total_missing_all}\n")
+
+def categorical_encoding():
+    base_dir = Path(__file__).resolve().parents[1]
+
+    data_dir = base_dir / "data/data_id"
+    out_dir = base_dir / "data/data_cleaned"
+    os.makedirs(out_dir, exist_ok=True)
+
+    ##### Encoding the categorical variables (machine_process and tool_condition) #####
+    for i in range(1, 19):
+        exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
+        df = pd.read_csv(exp_file)
+
+        # Convert 'tool_condition' to binary
+        df['tool_condition'] = df['tool_condition'].astype(str).str.lower()
+        df['tool_condition'] = df['tool_condition'].map({'worn': 1,'unworn': 0,}).astype(int)
+
+        # One-hot encode 'machine_process'
+        df = pd.get_dummies(df, columns=['Machining_Process'], drop_first=True)
+
+        # Save cleaned data
+        out_name = out_dir / f"experiment_{i:02d}_cleaned.csv"
+        df.to_csv(out_name, index=False)
+
+    print("All experiments cleaned successfully")
+
