@@ -12,8 +12,8 @@ def load_experiments():
     dftrain = pd.read_csv(f"data/train.csv")
     return experiments, dftrain
 
-
-def process_and_save_experiments():
+# The method to encode experiments with IDs and tool conditions
+def experiment_encoding():
     base_dir = Path(__file__).resolve().parents[1]
 
     data_dir = base_dir / "data/data_raw"
@@ -28,16 +28,32 @@ def process_and_save_experiments():
         exp_file = data_dir / f"experiment_{i:02d}.csv"
         df = pd.read_csv(exp_file)
 
-        tool_condition = meta.loc[
-            meta["experiment_id"] == i, "tool_condition"
-        ].values[0]
+        tool_condition = meta.loc[meta["experiment_id"] == i, "tool_condition"].values[0]
+        feedrate = meta.loc[meta["experiment_id"] == i, "feedrate"].values[0]
+        clamp_pressure = meta.loc[meta["experiment_id"] == i, "clamp_pressure"].values[0]
 
         df["experiment_id"] = i
         df["tool_condition"] = tool_condition
+        df["feedrate"] = feedrate
+        df["clamp_pressure"] = clamp_pressure
 
         out_name = out_dir / f"experiment_{i:02d}_idd.csv"
         df.to_csv(out_name, index=False)
 
-    print("All experiments processed and saved successfully.")
+    print("All experiments encoded successfully")
 
-process_and_save_experiments()
+# The method to normalize, remove missing values, and smooth the overall data.
+def data_cleaning():
+    base_dir = Path(__file__).resolve().parents[1]
+
+    data_dir = base_dir / "data/data_id"
+    out_dir = base_dir / "data/data_cleaned"
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Using linear interpolation to fill missing values
+    for i in range(1, 19):
+        exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
+        df = pd.read_csv(exp_file)
+
+        df = df.interpolate(method="linear", limit_direction="both")
