@@ -213,9 +213,10 @@ import pandas as pd
 from pathlib import Path
 
 WINDOW_SIZE = 10
-TRAIN_EXPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-VAL_EXPS   = [13, 14]
-TEST_EXPS  = [15, 16, 17, 18]
+TRAIN_EXPS = [1,2,3,4,5,6,7,8,9,10,15,18]
+VAL_EXPS = [11, 13]
+TEST_EXPS = [12, 16, 14, 17]
+
 
 
 def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_col="tool_condition"):
