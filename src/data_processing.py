@@ -1,15 +1,22 @@
+
+import os
 import pandas as pd
 from pathlib import Path
-import os
-
 
 def load_experiments():
-    experiments = []
+    # Resolve project root:    CNC-Tool-Wear/
+    base = Path(__file__).resolve().parent.parent
 
+    # Path to raw data:        CNC-Tool-Wear/data/data_raw/
+    data_path = base / "data" / "data_raw"
+
+    experiments = []
     for i in range(1, 19):
-        df = pd.read_csv(f"data_raw/experiment_{i:02d}.csv")
-        experiments.append(df)
-    dftrain = pd.read_csv(f"data_raw/train.csv")
+        fp = data_path / f"experiment_{i:02d}.csv"
+        experiments.append(pd.read_csv(fp))
+
+    dftrain = pd.read_csv(data_path / "train.csv")
+
     return experiments, dftrain
 
 # The method to encode experiments with IDs and tool conditions
