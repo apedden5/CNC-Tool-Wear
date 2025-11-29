@@ -7,9 +7,8 @@ from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.utils import class_weight
 
 
-# ---------------------------------------------------------
+
 # LOAD WINDOWED CSV (generic, detects window_len + features)
-# ---------------------------------------------------------
 def load_window_csv(path, target_col="tool_condition"):
     """
     Loads a windowed CSV where column names follow:
@@ -41,9 +40,8 @@ def load_window_csv(path, target_col="tool_condition"):
     return X, y, window_len, num_features
 
 
-# ---------------------------------------------------------
+
 # BUILD LSTM MODEL
-# ---------------------------------------------------------
 def build_lstm_model(window_len, num_features, units=64, dropout_rate=0.2):
 
     model = Sequential([
@@ -68,9 +66,8 @@ def build_lstm_model(window_len, num_features, units=64, dropout_rate=0.2):
     return model
 
 
-# ---------------------------------------------------------
+
 # TRAIN MODEL WITH CLASS WEIGHTS
-# ---------------------------------------------------------
 def train_lstm(model, X_train, y_train, X_val, y_val, epochs=40, batch_size=32):
 
     # Compute class weights => handles imbalance
