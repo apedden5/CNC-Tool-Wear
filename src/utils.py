@@ -115,32 +115,3 @@ def compare_worn_unworn_multi_feature(data_path, features, title=None):
 
     plt.tight_layout()
     plt.show()
-
-
-
-
-
-
-
-
-from data_processing import categorical_encoding, checking_missing_values, drop_features, experiment_encoding, make_windowed_datasets, normalize_filtered
-
-#experiment_encoding()
-#checking_missing_values()
-#categorical_encoding()
-
-#drop_features()
-#normalize_filtered() 
-
-
-
-
-
-
-make_windowed_datasets()
-
-
-
-
-
-

@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+
+# Ignore data folders
+data/
+
+# Ignore model outputs
+models/
+*.pt
+*.png
+
+# Python cache files
+__pycache__/
+*.pyc

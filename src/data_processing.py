@@ -1,152 +1,211 @@
-
 import os
-import pandas as pd
+import shutil
 from pathlib import Path
 
-def load_experiments():
-    # Resolve project root:    CNC-Tool-Wear/
-    base = Path(__file__).resolve().parent.parent
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+import lightgbm as lgb
 
-    # Path to raw data:        CNC-Tool-Wear/data/data_raw/
-    data_path = base / "data" / "data_raw"
+# ------------------------
+# Global config
+# ------------------------
+WINDOW_SIZE = 10
+STRIDE      = 1  # step size for sliding windows
 
-    experiments = []
-    for i in range(1, 19):
-        fp = data_path / f"experiment_{i:02d}.csv"
-        experiments.append(pd.read_csv(fp))
+# experiment splits (adjust if you change them later)
+TRAIN_EXPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 18]
+VAL_EXPS   = [11, 13]
+TEST_EXPS  = [12, 14, 16, 17]
 
-    dftrain = pd.read_csv(data_path / "train.csv")
+TARGET_COL = "successful_part"
 
-    return experiments, dftrain
 
-# The method to combine the experiement data with the experiment metadata.
+# ------------------------
+# Helpers
+# ------------------------
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _clear_dir(path: Path):
+    if path.exists():
+        for p in path.iterdir():
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+# ----------------------------------------------------
+# 1) Combine experiment data with metadata + drop cols
+# ----------------------------------------------------
 def experiment_encoding():
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir = _project_root()
 
-    data_dir = base_dir / "data/data_raw"
-    out_dir = base_dir / "data/data_id"
-
-    os.makedirs(out_dir, exist_ok=True)
+    data_dir = base_dir / "data" / "data_raw"
+    out_dir  = base_dir / "data" / "data_id"
+    _clear_dir(out_dir)
 
     meta = pd.read_csv(data_dir / "train.csv")
     meta = meta.rename(columns={"No": "experiment_id"})
+
+    # columns to remove from raw experiments
+    drop_cols = [
+        "M1_CURRENT_PROGRAM_NUMBER",
+        "M1_sequence_number",
+        "M1_CURRENT_FEEDRATE",
+        "Machining_Process",
+    ]
 
     for i in range(1, 19):
         exp_file = data_dir / f"experiment_{i:02d}.csv"
         df = pd.read_csv(exp_file)
 
-        tool_condition = meta.loc[meta["experiment_id"] == i, "tool_condition"].values[0]
-        feedrate = meta.loc[meta["experiment_id"] == i, "feedrate"].values[0]
-        clamp_pressure = meta.loc[meta["experiment_id"] == i, "clamp_pressure"].values[0]
+        # drop unwanted columns
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
+        # grab metadata row for this experiment
+        row = meta.loc[meta["experiment_id"] == i].iloc[0]
+
+        # ---------- NEW TARGET: successful_part ----------
+        # successful_part = 1 if machining_finalized == yes AND passed_visual_inspection == yes
+        # otherwise 0 (includes unfinished or failed visual inspection)
+        passed   = str(row["passed_visual_inspection"]).lower()
+        finished = str(row["machining_finalized"]).lower()
+
+        if finished == "yes" and passed == "yes":
+            label = 1
+        else:
+            label = 0
+
+        df[TARGET_COL] = label
+
+        # keep tool_condition as a binary feature (worn=1, unworn=0)
+        tc = str(row["tool_condition"]).lower()
+        df["tool_condition"] = 1 if tc == "worn" else 0
+
+        # metadata features
         df["experiment_id"] = i
-        df["tool_condition"] = tool_condition
-        df["feedrate"] = feedrate
-        df["clamp_pressure"] = clamp_pressure
+        df["time_step"] = np.arange(len(df), dtype=int)
 
         out_name = out_dir / f"experiment_{i:02d}_idd.csv"
         df.to_csv(out_name, index=False)
 
-    print("All experiments encoded successfully")
+    print("All experiments encoded with successful_part and tool_condition.")
 
-# The method to normalize, remove missing values, and smooth the overall data.
 
+# ----------------------------------------------------
+# 2) Check missing values (sanity check only)
+# ----------------------------------------------------
 def checking_missing_values():
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir = _project_root()
+    data_dir = base_dir / "data" / "data_id"
 
-    data_dir = base_dir / "data/data_id"
-    out_dir = base_dir / "data/data_cleaned"
-    os.makedirs(out_dir, exist_ok=True)
-
-    ##### Checking for missing values across all experiments #####
-    total_missing_all = 0  # accumulator
-
+    total_missing_all = 0
     for i in range(1, 19):
         exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
         df = pd.read_csv(exp_file)
-
-        # Count missing values for this experiment
         total_missing_all += df.isnull().sum().sum()
 
-    # Final summary print
-    print(f"\nTotal missing values across all experiments: {total_missing_all}\n")
+    print(f"\nTotal missing values across all experiments (data_id): {total_missing_all}\n")
 
+
+# ----------------------------------------------------
+# 3) Ensure target is int, save cleaned CSVs
+# ----------------------------------------------------
 def categorical_encoding():
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir = _project_root()
 
-    data_dir = base_dir / "data/data_id"
-    out_dir = base_dir / "data/data_cleaned"
-    os.makedirs(out_dir, exist_ok=True)
+    data_dir = base_dir / "data" / "data_id"
+    out_dir  = base_dir / "data" / "data_cleaned"
+    _clear_dir(out_dir)
 
-    ##### Encoding the categorical variables (machine_process and tool_condition) #####
     for i in range(1, 19):
         exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
         df = pd.read_csv(exp_file)
 
-        # Convert 'tool_condition' to binary
-        df['tool_condition'] = df['tool_condition'].astype(str).str.lower()
-        df['tool_condition'] = df['tool_condition'].map({'worn': 1,'unworn': 0,}).astype(int)
+        # ensure successful_part is int 0/1
+        df[TARGET_COL] = df[TARGET_COL].astype(int)
 
-        # One-hot encode 'machine_process'
-        df = pd.get_dummies(df, columns=['Machining_Process'], drop_first=True)
+        # ensure tool_condition is int 0/1
+        df["tool_condition"] = df["tool_condition"].astype(int)
 
-        # Save cleaned data
         out_name = out_dir / f"experiment_{i:02d}_cleaned.csv"
         df.to_csv(out_name, index=False)
 
-    print("All experiments cleaned successfully")
+    print("All experiments cleaned and encoded (successful_part, tool_condition).")
 
-from pathlib import Path
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 
-def plot_feature_importance():
-    base_dir = Path(__file__).resolve().parents[1]
+# ----------------------------------------------------
+# 4) Feature importance with LightGBM (on TRAIN_EXPS)
+# ----------------------------------------------------
+def compute_feature_importance():
+    base_dir    = _project_root()
     cleaned_dir = base_dir / "data" / "data_cleaned"
 
-    train_exps = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
     dfs = []
-    for i in train_exps:
+    for i in TRAIN_EXPS:
         f = cleaned_dir / f"experiment_{i:02d}_cleaned.csv"
         df = pd.read_csv(f)
         dfs.append(df)
 
     train_all = pd.concat(dfs, axis=0, ignore_index=True)
 
-    y = train_all["tool_condition"]
-    drop_cols = ["tool_condition", "experiment_id", "time_ms"]
+    y = train_all[TARGET_COL]
+
+    drop_cols = [
+        TARGET_COL,
+        "experiment_id",
+        "time_ms",
+        "time_step",
+    ]
+    drop_cols = [c for c in drop_cols if c in train_all.columns]
+
     feature_cols = [c for c in train_all.columns if c not in drop_cols]
     X = train_all[feature_cols]
 
-    rf = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced",
-    )
-    rf.fit(X, y)
+    lgb_train = lgb.Dataset(X, label=y)
 
-    importances = rf.feature_importances_
+    params = {
+        "objective": "binary",
+        "metric": "binary_logloss",
+        "learning_rate": 0.05,
+        "num_leaves": 64,
+        "feature_fraction": 0.8,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 1,
+        "min_data_in_leaf": 50,
+        "verbose": -1,
+    }
+
+    model = lgb.train(params, lgb_train, num_boost_round=300)
+
+    importances = model.feature_importance()
     feat_imp = (
         pd.DataFrame({"feature": feature_cols, "importance": importances})
         .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
     )
 
     return feat_imp
 
 
-def drop_features():
-    base_dir = Path(__file__).resolve().parents[1]
-    cleaned_dir = base_dir / "data" / "data_cleaned"
+# ----------------------------------------------------
+# 5) Keep only top-K features
+# ----------------------------------------------------
+def drop_features(top_k: int = 25):
+    base_dir     = _project_root()
+    cleaned_dir  = base_dir / "data" / "data_cleaned"
     filtered_dir = base_dir / "data" / "data_filtered"
-    filtered_dir.mkdir(parents=True, exist_ok=True)
+    _clear_dir(filtered_dir)
 
-    feat_imp = plot_feature_importance()
-    top25_features = feat_imp.head(25)["feature"].tolist()
+    feat_imp = compute_feature_importance()
+    top_features = feat_imp.head(top_k)["feature"].tolist()
 
-    keep_cols = top25_features + ["tool_condition", "experiment_id", "time_ms"]
+    # always keep target + metadata columns if present
+    keep_cols = top_features + [TARGET_COL, "experiment_id", "time_ms", "time_step"]
 
     for i in range(1, 19):
         f = cleaned_dir / f"experiment_{i:02d}_cleaned.csv"
@@ -157,36 +216,31 @@ def drop_features():
         out_path = filtered_dir / f"experiment_{i:02d}_filtered.csv"
         df_reduced.to_csv(out_path, index=False)
 
-        print(f"Experiment {i:02d} reduced → {out_path.name}")
+    print(f"All experiments reduced to top {top_k} features (plus target/metadata).")
 
 
+# ----------------------------------------------------
+# 6) Normalize filtered features (fit scaler on TRAIN_EXPS)
+# ----------------------------------------------------
 def normalize_filtered():
-    """
-    1. Load filtered CSVs.
-    2. Fit StandardScaler on *combined training experiments* (1–12).
-    3. Apply scaler to each experiment separately.
-    4. Save *_normalized.csv.
-    """
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir     = _project_root()
     filtered_dir = base_dir / "data" / "data_filtered"
-    norm_dir = base_dir / "data" / "data_normalized"
-    norm_dir.mkdir(parents=True, exist_ok=True)
+    norm_dir     = base_dir / "data" / "data_normalized"
+    _clear_dir(norm_dir)
 
-    train_exps = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-    # --- collect training data ---
+    # collect training experiments
     train_dfs = []
-    for i in train_exps:
+    for i in TRAIN_EXPS:
         f = filtered_dir / f"experiment_{i:02d}_filtered.csv"
         df = pd.read_csv(f)
         train_dfs.append(df)
 
-    # Columns common to all training experiments
+    # find common columns across train exps
     common_cols = set(train_dfs[0].columns)
     for df in train_dfs[1:]:
         common_cols &= set(df.columns)
 
-    drop_cols = {"tool_condition", "experiment_id", "time_ms"}
+    drop_cols = {TARGET_COL, "experiment_id", "time_ms", "time_step"}
     feature_cols = [c for c in common_cols if c not in drop_cols]
 
     train_all = pd.concat([df[feature_cols] for df in train_dfs],
@@ -195,66 +249,68 @@ def normalize_filtered():
     scaler = StandardScaler()
     scaler.fit(train_all[feature_cols])
 
-    # --- normalize each experiment separately ---
+    # apply scaler to ALL experiments
     for i in range(1, 19):
         f = filtered_dir / f"experiment_{i:02d}_filtered.csv"
         df = pd.read_csv(f)
 
         df_scaled = df.copy()
-        df_scaled[feature_cols] = scaler.transform(df[feature_cols])
+        # only scale columns that we actually fitted
+        cols_to_scale = [c for c in feature_cols if c in df.columns]
+        df_scaled[cols_to_scale] = scaler.transform(df[cols_to_scale])
 
         out_path = norm_dir / f"experiment_{i:02d}_normalized.csv"
         df_scaled.to_csv(out_path, index=False)
 
-        print(f"Experiment {i:02d} normalized → {out_path.name}")
-
-import numpy as np
-import pandas as pd
-from pathlib import Path
-
-WINDOW_SIZE = 10
-TRAIN_EXPS = [1,2,3,4,5,6,7,8,9,10,15,18]
-VAL_EXPS = [11, 13]
-TEST_EXPS = [12, 16, 14, 17]
+    print("All experiments normalized using training experiments' stats.")
 
 
-
-def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_col="tool_condition"):
+# ----------------------------------------------------
+# 7) Create windowed CSV datasets (train/val/test)
+# ----------------------------------------------------
+def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_col=TARGET_COL):
     rows = []
 
     for i in exp_ids:
         f = norm_dir / f"experiment_{i:02d}_normalized.csv"
         df = pd.read_csv(f)
 
+        # sort by time if present
         if "time_ms" in df.columns:
             df = df.sort_values("time_ms")
 
-        feats = df[feature_cols].values
+        feats  = df[feature_cols].values
         labels = df[target_col].values
         n = len(df)
 
-        # precompute column names once (feat_t0, feat_t1, ...)
-        win_feature_cols = [f"{feat}_t{t}" for t in range(window_size) for feat in feature_cols]
+        # column names for flattened window
+        win_feature_cols = [
+            f"{feat}_t{t}"
+            for t in range(window_size)
+            for feat in feature_cols
+        ]
 
-        for start in range(0, n - window_size + 1):
+        # sliding windows with stride
+        for start in range(0, n - window_size + 1, STRIDE):
             end = start + window_size
-            window_feats = feats[start:end, :]                   # (W, F)
-            flat = window_feats.reshape(-1)                      # length W*F
+            window_feats = feats[start:end, :]     # (W, F)
+            flat = window_feats.reshape(-1)        # (W*F,)
 
             row = dict(zip(win_feature_cols, flat))
-            row[target_col] = labels[end - 1]                    # label = last step
+            row[target_col] = labels[end - 1]      # label at last step
+            row["experiment_id"] = df["experiment_id"].iloc[end - 1]
             rows.append(row)
 
     return pd.DataFrame(rows)
 
 
 def make_windowed_datasets():
-    base_dir = Path(__file__).resolve().parents[1]
+    base_dir = _project_root()
     norm_dir = base_dir / "data" / "data_normalized"
-    out_dir = base_dir / "data" / "data_windowed_csv"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir  = base_dir / "data" / "data_windowed_csv"
+    _clear_dir(out_dir)
 
-    # --- infer common feature columns across ALL normalized experiments ---
+    # infer common feature columns across ALL normalized experiments
     dfs = []
     for i in range(1, 19):
         f = norm_dir / f"experiment_{i:02d}_normalized.csv"
@@ -264,7 +320,7 @@ def make_windowed_datasets():
     for df in dfs[1:]:
         common_cols &= set(df.columns)
 
-    drop_cols = {"tool_condition", "experiment_id", "time_ms"}
+    drop_cols = {TARGET_COL, "experiment_id", "time_ms", "time_step"}
     feature_cols = [c for c in dfs[0].columns if c in common_cols and c not in drop_cols]
 
     train_df = _windows_to_csv_rows(TRAIN_EXPS, norm_dir, WINDOW_SIZE, feature_cols)
@@ -279,7 +335,19 @@ def make_windowed_datasets():
     val_df.to_csv(val_path, index=False)
     test_df.to_csv(test_path, index=False)
 
-    print("Saved:")
+    print("Saved windowed datasets:")
     print("  ", train_path)
     print("  ", val_path)
     print("  ", test_path)
+
+
+# ----------------------------------------------------
+# Full pipeline
+# ----------------------------------------------------
+if __name__ == "__main__":
+    experiment_encoding()
+    checking_missing_values()
+    categorical_encoding()
+    drop_features(top_k=25)
+    normalize_filtered()
+    make_windowed_datasets()
