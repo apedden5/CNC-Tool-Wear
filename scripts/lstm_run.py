@@ -102,7 +102,7 @@ def train_lstm(model, X_train, y_train, X_val, y_val, epochs=40, batch_size=32):
 # ---------------------------------------------------------
 # PREDICT WITH LOWER THRESHOLD
 # ---------------------------------------------------------
-def predict_wear(model, X_test, threshold=0.30):
+def predict_wear(model, X_test, threshold=0.5):
     """
     Returns:
         preds = hard class labels (0/1)
