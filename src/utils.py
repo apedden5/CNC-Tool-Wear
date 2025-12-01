@@ -58,60 +58,97 @@ def plot_feedrate_clamp_joint(df, title="Feedrate vs Clamp Pressure by Tool Cond
 
     return g
 
+def plot_feedrate_clamp_joint_successful(df, title="Feedrate vs Clamp Pressure by Successful Part"):
 
-
-
-def compare_worn_unworn_multi_feature(data_path, features, title=None):
+    sns.set(style="whitegrid")
 
     
-    unworn_exps = [1, 2, 3, 4, 5, 6, 11, 12, 16]
-    worn_exps   = [7, 8, 9, 10, 13, 14, 15, 17, 18]
+    df = df.copy()
+    df["successful_label"] = df["successful_part"].map({1: "successful", 0: "not successful"})
 
-    # Load all experiment files
-    all_files = list(Path(data_path).glob("experiment_*_idd.csv"))
+    g = sns.jointplot(
+        data=df,
+        x="feedrate",
+        y="clamp_pressure",
+        hue="successful_label",      
+        palette="Set1",
+        kind="scatter",
+        height=8
+    )
 
-    df_worn_list = []
-    df_unworn_list = []
+    g.plot_joint(sns.kdeplot, levels=5, alpha=0.4)
 
-    for f in all_files:
-        df = pd.read_csv(f)
-        exp_id = int(f.name.split("_")[1])
+    plt.suptitle(title, fontsize=18, y=1.03)
 
-        if exp_id in unworn_exps:
-            df_unworn_list.append(df)
-        elif exp_id in worn_exps:
-            df_worn_list.append(df)
+    return g
 
-    df_unworn = pd.concat(df_unworn_list, ignore_index=True)
-    df_worn   = pd.concat(df_worn_list, ignore_index=True)
+
+
+def compare_four_group_multi_feature(data_path, features, title=None):
+
+
+    # Load all cleaned experiment files (since they contain both labels)
+    all_files = list(Path(data_path).glob("experiment_*_cleaned.csv"))
+    dfs = [pd.read_csv(f) for f in all_files]
+    df = pd.concat(dfs, ignore_index=True)
+
+    # Define groups
+    unworn_df = df[df["tool_condition"] == 0]
+    worn_df   = df[df["tool_condition"] == 1]
+    success_df = df[df["successful_part"] == 1]
+    fail_df    = df[df["successful_part"] == 0]
 
     # --- Plotting ---
     n = len(features)
-    cols = 2  # you can change to 3 for 3-wide layout
+    cols = 2
     rows = math.ceil(n / cols)
 
-    fig, axes = plt.subplots(rows, cols, figsize=(cols*6, rows*4))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 6, rows * 4))
     axes = axes.flatten()
 
     for i, feature in enumerate(features):
         ax = axes[i]
 
-        unworn_mean = df_unworn[feature].mean()
-        worn_mean = df_worn[feature].mean()
+        # Compute means
+        vals = [
+            unworn_df[feature].mean(),
+            worn_df[feature].mean(),
+            success_df[feature].mean(),
+            fail_df[feature].mean()
+        ]
 
-        ax.bar(["Unworn", "Worn"], [unworn_mean, worn_mean],
-               color=["steelblue", "firebrick"])
+        labels = ["Unworn", "Worn", "Successful", "Not Successful"]
+        colors = ["steelblue", "firebrick", "green", "orange"]
 
+        ax.bar(labels, vals, color=colors)
         ax.set_title(feature, fontsize=12)
         ax.set_ylabel("Mean Value")
         ax.grid(axis="y", alpha=0.3)
 
-    # Hide unused subplots (if features % cols != 0)
-    for j in range(i+1, len(axes)):
+    # Hide unused subplots
+    for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
     if title:
         fig.suptitle(title, fontsize=18, y=1.02)
 
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+
+
+
+def plot_feature_importance(feat_imp, top_n=30):
+    
+    df = feat_imp.head(top_n).sort_values("importance", ascending=True)
+
+    plt.figure(figsize=(8, 10))
+    plt.barh(df["feature"], df["importance"], color="purple")
+    plt.xlabel("Importance", fontsize=14)
+    plt.ylabel("Features", fontsize=14)
+    plt.title("Feature Importance", fontsize=18)
     plt.tight_layout()
     plt.show()
