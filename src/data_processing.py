@@ -1,11 +1,26 @@
 import os
 import shutil
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import lightgbm as lgb
+
+def load_experiments():
+    # Resolve project root: CNC-Tool-Wear/
+    base = Path(__file__).resolve().parent.parent
+
+    # Path to raw data: CNC-Tool-Wear/data/data_raw/
+    data_path = base / "data" / "data_raw"
+
+    experiments = []
+    for i in range(1, 19):
+        fp = data_path / f"experiment_{i:02d}.csv"
+        experiments.append(pd.read_csv(fp))
+
+    dftrain = pd.read_csv(data_path / "train.csv")
+
+    return experiments, dftrain
 
 # ------------------------
 # Global config
