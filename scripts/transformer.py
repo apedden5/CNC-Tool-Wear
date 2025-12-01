@@ -97,14 +97,6 @@ print("num_classes :", num_classes)
 
 
 class TransformerEncoderBlock(Layer):
-    """
-    Same structure as the course lab:
-
-      attn = MultiHeadAttention(...)
-      out1 = LayerNorm(x + Dropout(attn(x)))
-      ffn  = Conv1D(1x1) -> ReLU -> Conv1D(1x1)
-      out2 = LayerNorm(out1 + Dropout(ffn(out1)))
-    """
     def __init__(self, num_heads, ff_dim, rate=0.1, **kwargs):
         super().__init__(**kwargs)
         # Multi-head self-attention
@@ -136,16 +128,6 @@ class TransformerEncoderBlock(Layer):
 # ------------------------ keras-tuner model builder ------------------------
 
 def build_transformer_model(hp: kt.HyperParameters) -> Model:
-    """
-    Hypermodel used by keras-tuner GridSearch.
-    Keeps architecture very close to the lab, but tunes a few key knobs:
-      - num_heads   ∈ {2, 4}
-      - ff_dim      ∈ {64, 128}
-      - num_blocks  ∈ {1, 2, 3}
-      - dense_units ∈ {32, 64, 96, 128}
-      - dropout_rate∈ {0.1, 0.2, 0.3}
-      - lr          ∈ {1e-3, 5e-4, 2e-4}
-    """
     num_heads = hp.Choice("num_heads", [2, 4])
     ff_dim    = hp.Choice("ff_dim", [64, 128])
     num_blocks = hp.Choice("num_blocks", [1, 2, 3])
