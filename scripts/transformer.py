@@ -1,7 +1,5 @@
-# transformer.py  –  Keras Transformer with keras-tuner HPO
-
 import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # avoid OpenMP clash on Windows
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 from pathlib import Path
 
@@ -26,198 +24,289 @@ from keras.callbacks import EarlyStopping
 import keras_tuner as kt
 from sklearn.metrics import f1_score, confusion_matrix, roc_curve, auc
 
-# ------------------------ Global config ------------------------
 
-TARGET_COL   = "successful_part"
-WINDOW_SIZE  = 10
-NUM_CLASSES  = 2
+# ----------- basic config -----------
 
-BATCH_SIZE   = 64
-EPOCHS_TUNE  = 40      # per trial
-EPOCHS_FINAL = 60      # final best model
+DEFAULT_TARGET_COL   = "successful_part"
+DEFAULT_WINDOW_SIZE  = 10
+NUM_CLASSES          = 2
 
-# ------------------------ Paths ------------------------
+DEFAULT_BATCH_SIZE   = 64
+DEFAULT_EPOCHS_TUNE  = 40
+DEFAULT_EPOCHS_FINAL = 60
+
+# simple baseline (also in HPO search space)
+BASELINE_PARAMS = {
+    "num_heads": 2,
+    "ff_dim": 64,
+    "num_blocks": 2,
+    "dense_units": 32,
+    "dropout_rate": 0.2,
+    "lr": 1e-3,
+}
+
+
+# ----------- data helpers -----------
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
-BASE_DIR = _project_root()
-WIN_DIR  = BASE_DIR / "data" / "data_windowed_csv"
 
-TRAIN_CSV = WIN_DIR / f"train_windows_w{WINDOW_SIZE}.csv"
-VAL_CSV   = WIN_DIR / f"val_windows_w{WINDOW_SIZE}.csv"
-TEST_CSV  = WIN_DIR / f"test_windows_w{WINDOW_SIZE}.csv"
+def _window_paths(window_size: int, base_dir: Path | None = None) -> dict:
+    if base_dir is None:
+        base_dir = _project_root()
+    win_dir = base_dir / "data" / "data_windowed_csv"
+    return {
+        "base_dir": base_dir,
+        "train": win_dir / f"train_windows_w{window_size}.csv",
+        "val":   win_dir / f"val_windows_w{window_size}.csv",
+        "test":  win_dir / f"test_windows_w{window_size}.csv",
+    }
 
 
-# ------------------------ Data loading ------------------------
-
-def load_windowed_csv(csv_path: Path):
-    """
-    Load a windowed CSV and return:
-      X: (N, W, F) float32
-      y: (N,) float32 (0 / 1)
-    """
+def _load_windowed(csv_path: Path, target_col: str):
     df = pd.read_csv(csv_path)
 
-    if TARGET_COL not in df.columns:
-        raise ValueError(f"{TARGET_COL} not in {csv_path}")
-
-    non_feat = {TARGET_COL, "experiment_id"}
+    non_feat = {target_col, "experiment_id"}
     flat_cols = [c for c in df.columns if c not in non_feat]
 
     base_feats   = sorted({c.rsplit("_t", 1)[0] for c in flat_cols})
     time_indices = sorted({int(c.rsplit("_t", 1)[1]) for c in flat_cols})
 
-    if len(time_indices) != WINDOW_SIZE:
-        raise ValueError(f"Expected {WINDOW_SIZE} timesteps, found {len(time_indices)}")
-
     X_list = []
     for t in time_indices:
-        cols_t = [f"{feat}_t{t}" for feat in base_feats]
+        cols_t = [f"{f}_t{t}" for f in base_feats]
         X_t = df[cols_t].values.astype("float32")
         X_list.append(X_t)
 
     X = np.stack(X_list, axis=1)  # (N, W, F)
-    y = df[TARGET_COL].values.astype("float32")
-
+    y = df[target_col].values.astype("float32")
     return X, y
 
 
-# ------------------------ Transformer block ------------------------
+def load_transformer_data(
+    window_size: int = DEFAULT_WINDOW_SIZE,
+    target_col: str = DEFAULT_TARGET_COL,
+    base_dir: Path | None = None,
+):
+    paths = _window_paths(window_size, base_dir)
 
-# time_steps / num_features are needed inside the block just like in the lab
-X_train_tmp, _ = load_windowed_csv(TRAIN_CSV)
-time_steps   = X_train_tmp.shape[1]
-num_features = X_train_tmp.shape[2]
-num_classes  = NUM_CLASSES
+    X_train, y_train = _load_windowed(paths["train"], target_col)
+    X_val,   y_val   = _load_windowed(paths["val"], target_col)
+    X_test,  y_test  = _load_windowed(paths["test"], target_col)
 
-print("time_steps :", time_steps)
-print("num_features:", num_features)
-print("num_classes :", num_classes)
+    time_steps   = X_train.shape[1]
+    num_features = X_train.shape[2]
 
+    meta = {
+        "time_steps": time_steps,
+        "num_features": num_features,
+        "paths": paths,
+        "target_col": target_col,
+        "window_size": window_size,
+    }
+
+    print("time_steps:", time_steps,
+          "num_features:", num_features,
+          "num_classes:", NUM_CLASSES)
+
+    return X_train, y_train, X_val, y_val, X_test, y_test, meta
+
+
+# ----------- transformer block (same idea as your lab) -----------
 
 class TransformerEncoderBlock(Layer):
-    def __init__(self, num_heads, ff_dim, rate=0.1, **kwargs):
+    def __init__(self, num_heads, ff_dim, num_features, rate=0.1, **kwargs):
         super().__init__(**kwargs)
-        # Multi-head self-attention
         self.att = MultiHeadAttention(num_heads=num_heads, key_dim=1)
-
-        # Feed-forward via Conv1D(1x1)
         self.conv1 = Conv1D(filters=ff_dim, kernel_size=1, activation="relu")
         self.conv2 = Conv1D(filters=num_features, kernel_size=1)
-
-        # LayerNorm + Dropout
         self.layernorm1 = LayerNormalization(epsilon=1e-6)
         self.layernorm2 = LayerNormalization(epsilon=1e-6)
         self.dropout1   = Dropout(rate)
         self.dropout2   = Dropout(rate)
 
     def call(self, inputs, training=False):
-        # --- First residual: attention ---
-        attn_output = self.att(inputs, inputs)                 # self-attention
-        attn_output = self.dropout1(attn_output, training=training)
-        out1 = self.layernorm1(inputs + attn_output)           # residual + norm
+        # self-attention + residual
+        attn = self.att(inputs, inputs)
+        attn = self.dropout1(attn, training=training)
+        out1 = self.layernorm1(inputs + attn)
 
-        # --- Second residual: feed-forward via Conv1D(1x1) ---
-        ffn_output = self.conv1(out1)
-        ffn_output = self.conv2(ffn_output)
-        ffn_output = self.dropout2(ffn_output, training=training)
-        return self.layernorm2(out1 + ffn_output)              # residual + norm
+        # 1x1 conv FFN + residual
+        ffn = self.conv1(out1)
+        ffn = self.conv2(ffn)
+        ffn = self.dropout2(ffn, training=training)
+        return self.layernorm2(out1 + ffn)
 
 
-# ------------------------ keras-tuner model builder ------------------------
+# ----------- build model from params -----------
 
-def build_transformer_model(hp: kt.HyperParameters) -> Model:
-    num_heads = hp.Choice("num_heads", [2, 4])
-    ff_dim    = hp.Choice("ff_dim", [64, 128])
-    num_blocks = hp.Choice("num_blocks", [1, 2, 3])
-    dense_units = hp.Int("dense_units", min_value=32, max_value=128, step=32)
-    dropout_rate = hp.Choice("dropout_rate", [0.1, 0.2, 0.3])
-    lr = hp.Choice("lr", [1e-3, 5e-4, 2e-4])
+def build_transformer(
+    time_steps: int,
+    num_features: int,
+    params: dict | None = None,
+):
+    """
+    params keys: num_heads, ff_dim, num_blocks, dense_units, dropout_rate, lr
+    If params is None -> BASELINE_PARAMS.
+    """
+    if params is None:
+        params = BASELINE_PARAMS
 
     inputs = Input(shape=(time_steps, num_features))
     x = inputs
 
-    for _ in range(num_blocks):
+    for _ in range(params["num_blocks"]):
         x = TransformerEncoderBlock(
-            num_heads=num_heads,
-            ff_dim=ff_dim,
-            rate=dropout_rate,
+            num_heads=params["num_heads"],
+            ff_dim=params["ff_dim"],
+            num_features=num_features,
+            rate=params["dropout_rate"],
         )(x)
 
     x = Flatten()(x)
-    x = Dense(dense_units, activation="relu")(x)
-    x = Dropout(dropout_rate)(x)
-    outputs = Dense(1, activation="sigmoid")(x)  # binary classification
+    x = Dense(params["dense_units"], activation="relu")(x)
+    x = Dropout(params["dropout_rate"])(x)
+    outputs = Dense(1, activation="sigmoid")(x)
 
     model = Model(inputs, outputs)
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        optimizer=keras.optimizers.Adam(learning_rate=params["lr"]),
         loss="binary_crossentropy",
         metrics=["accuracy"],
     )
     return model
 
 
-# ------------------------ Main script ------------------------
+# ----------- generic training (no plots) -----------
 
-def main():
-    # ---- Load data ----
-    X_train, y_train = load_windowed_csv(TRAIN_CSV)
-    X_val,   y_val   = load_windowed_csv(VAL_CSV)
-    X_test,  y_test  = load_windowed_csv(TEST_CSV)
+def train_transformer(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    time_steps: int,
+    num_features: int,
+    params: dict | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    epochs: int = DEFAULT_EPOCHS_FINAL,
+    patience: int = 10,
+    verbose: int = 1,
+):
+    """
+    Generic training:
+      - baseline: call with params=None
+      - tuned:    call with params from HPO
+    Returns: model, history
+    """
+    model = build_transformer(time_steps, num_features, params)
 
-    print("X_train:", X_train.shape, "X_val:", X_val.shape, "X_test:", X_test.shape)
+    es = EarlyStopping(
+        monitor="val_loss",
+        patience=patience,
+        restore_best_weights=True,
+        verbose=1,
+    )
 
-    # ---- keras-tuner GridSearch ----
+    history = model.fit(
+        X_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(X_val, y_val),
+        callbacks=[es],
+        verbose=verbose,
+    )
+
+    return model, history
+
+
+# ----------- HPO (minimal) -----------
+
+def _hpo_builder(hp: kt.HyperParameters, time_steps: int, num_features: int) -> Model:
+    params = {
+        "num_heads":   hp.Choice("num_heads", [2, 4]),
+        "ff_dim":      hp.Choice("ff_dim", [64, 128]),
+        "num_blocks":  hp.Choice("num_blocks", [1, 2, 3]),
+        "dense_units": hp.Int("dense_units", 32, 128, step=32),
+        "dropout_rate": hp.Choice("dropout_rate", [0.1, 0.2, 0.3]),
+        "lr":          hp.Choice("lr", [1e-3, 5e-4, 2e-4]),
+    }
+    return build_transformer(time_steps, num_features, params)
+
+
+def tune_transformer(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    time_steps: int,
+    num_features: int,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    epochs_tune: int = DEFAULT_EPOCHS_TUNE,
+    max_trials: int = 25,
+    directory: str = "transformer_hpo",
+    project_name: str = "transformer_search",
+):
+    """
+    keras-tuner GridSearch around the same hyperparams as BASELINE_PARAMS.
+    Returns: best_hp, tuner
+    """
     keras.backend.clear_session()
 
     tuner = kt.GridSearch(
-        hypermodel=build_transformer_model,
+        hypermodel=lambda hp: _hpo_builder(hp, time_steps, num_features),
         objective="val_accuracy",
-        max_trials=25,                # small but useful search space
-        directory="transformer_hpo",
-        project_name="transformer_search",
+        max_trials=max_trials,
+        directory=directory,
+        project_name=project_name,
         overwrite=True,
     )
 
     tuner.search(
         X_train, y_train,
-        epochs=EPOCHS_TUNE,
-        batch_size=BATCH_SIZE,
+        epochs=epochs_tune,
+        batch_size=batch_size,
         validation_data=(X_val, y_val),
         verbose=1,
     )
 
     best_hp = tuner.get_best_hyperparameters(1)[0]
+
     print("\nBest hyperparameters:")
     for name in ["num_heads", "ff_dim", "num_blocks",
                  "dense_units", "dropout_rate", "lr"]:
         print(f"  {name}: {best_hp.get(name)}")
 
-    # ---- Build and train final model with best HPs ----
-    best_model = tuner.hypermodel.build(best_hp)
+    return best_hp, tuner
 
-    es = EarlyStopping(
-        monitor="val_loss",
-        patience=10,
-        restore_best_weights=True,
-        verbose=1,
-    )
 
-    history = best_model.fit(
-        X_train, y_train,
-        epochs=EPOCHS_FINAL,
-        batch_size=BATCH_SIZE,
-        validation_data=(X_val, y_val),
-        callbacks=[es],
-        verbose=1,
-    )
+def hp_to_params(best_hp: kt.HyperParameters) -> dict:
+    """Convert keras-tuner HyperParameters -> plain dict usable by train_transformer."""
+    return {
+        "num_heads":   best_hp.get("num_heads"),
+        "ff_dim":      best_hp.get("ff_dim"),
+        "num_blocks":  best_hp.get("num_blocks"),
+        "dense_units": best_hp.get("dense_units"),
+        "dropout_rate": best_hp.get("dropout_rate"),
+        "lr":          best_hp.get("lr"),
+    }
 
-    # ---- Evaluate on test set ----
-    test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
 
-    y_prob = best_model.predict(X_test, verbose=0).reshape(-1)
+# ----------- optional evaluation + plots (only if you call it) -----------
+
+def evaluate_and_plot(
+    model: Model,
+    history,
+    X_test,
+    y_test,
+    base_dir: Path | None = None,
+    prefix: str = "transformer",
+):
+    if base_dir is None:
+        base_dir = _project_root()
+
+    test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
+    y_prob = model.predict(X_test, verbose=0).reshape(-1)
     y_pred = (y_prob >= 0.5).astype(int)
 
     f1 = f1_score(y_test, y_pred)
@@ -226,66 +315,15 @@ def main():
     roc_auc = auc(fpr, tpr)
 
     print(f"\nTest loss: {test_loss:.4f}, Test accuracy: {test_acc:.4f}")
-    print(f"F1-score: {f1:.4f}")
-    print("Confusion matrix:")
-    print(cm)
-    print(f"ROC AUC: {roc_auc:.4f}")
+    print(f"F1-score: {f1:.4f}, ROC AUC: {roc_auc:.4f}")
+    print("Confusion matrix:\n", cm)
 
-    # ---- Plots ----
-    epochs = range(1, len(history.history["loss"]) + 1)
-
-    # Loss curve
-    plt.figure()
-    plt.plot(epochs, history.history["loss"], label="Train Loss")
-    plt.plot(epochs, history.history["val_loss"], label="Val Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Transformer – Successful Part (Train vs Val Loss)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(BASE_DIR / "transformer_keras_loss.png", dpi=200)
-    plt.show()
-
-    # Confusion matrix
-    plt.figure()
-    im = plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-    plt.title("Confusion Matrix (Test Set)")
-    plt.colorbar(im)
-    tick_marks = np.arange(NUM_CLASSES)
-    plt.xticks(tick_marks, [0, 1])
-    plt.yticks(tick_marks, [0, 1])
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
-    thresh = cm.max() / 2.0
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            plt.text(
-                j, i, format(cm[i, j], "d"),
-                ha="center", va="center",
-                color="white" if cm[i, j] > thresh else "black",
-            )
-    plt.tight_layout()
-    plt.savefig(BASE_DIR / "transformer_keras_confusion.png", dpi=200)
-    plt.show()
-
-    # ROC curve
-    plt.figure()
-    plt.plot(fpr, tpr, label=f"ROC curve (AUC = {roc_auc:.3f})")
-    plt.plot([0, 1], [0, 1], "k--", label="Random")
-    plt.xlabel("False Positive Rate (FPR)")
-    plt.ylabel("True Positive Rate (TPR)")
-    plt.title("ROC Curve – Successful Part (Test Set)")
-    plt.legend(loc="lower right")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(BASE_DIR / "transformer_keras_roc.png", dpi=200)
-    plt.show()
-
-    # Save final model
-    best_model.save(BASE_DIR / "transformer_keras_best.h5")
-    print(f"Saved final Keras model to {BASE_DIR / 'transformer_keras_best.h5'}")
-
-
-if __name__ == "__main__":
-    main()
+    # (you can keep / delete plots as you like)
+    # ...
+    return {
+        "test_loss": float(test_loss),
+        "test_accuracy": float(test_acc),
+        "f1": float(f1),
+        "roc_auc": float(roc_auc),
+        "cm": cm,
+    }

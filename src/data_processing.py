@@ -52,7 +52,7 @@ def experiment_encoding():
     base_dir = _project_root()
 
     data_dir = base_dir / "data" / "data_raw"
-    out_dir  = base_dir / "data" / "data_id"
+    out_dir  = base_dir / "data" / "data_cleaned"
     _clear_dir(out_dir)
 
     meta = pd.read_csv(data_dir / "train.csv")
@@ -97,10 +97,10 @@ def experiment_encoding():
         df["experiment_id"] = i
         df["time_step"] = np.arange(len(df), dtype=int)
 
-        out_name = out_dir / f"experiment_{i:02d}_idd.csv"
+        out_name = out_dir / f"experiment_{i:02d}_cleaned.csv"
         df.to_csv(out_name, index=False)
 
-    print("All experiments encoded with successful_part and tool_condition.")
+    print("All experiments encoded with successful_part, experiment_id, and tool_condition.")
 
 
 # A method to ensure there are no missing values in the dataset
@@ -108,17 +108,17 @@ def experiment_encoding():
 # this assumption prior to completing more pre-processing of the dataset.
 def checking_missing_values():
     base_dir = _project_root()
-    data_dir = base_dir / "data" / "data_id"
+    data_dir = base_dir / "data" / "data_cleaned"
 
     total_missing_all = 0
     for i in range(1, 19):
-        exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
+        exp_file = data_dir / f"experiment_{i:02d}_cleaned.csv"
         df = pd.read_csv(exp_file)
         total_missing_all += df.isnull().sum().sum()
 
-    print(f"\nTotal missing values across all experiments (data_id): {total_missing_all}\n")
+    print(f"\nTotal missing values across all experiments (data_cleaned): {total_missing_all}\n")
 
-
+'''
 # This method ensures that the binary categorical variables are stored as integers for the training models.
 # If they are not, we convert them to be simple binary.
 def categorical_encoding():
@@ -142,6 +142,7 @@ def categorical_encoding():
         df.to_csv(out_name, index=False)
 
     print("All experiments cleaned and encoded (successful_part, tool_condition).")
+'''
 
 # A method to complete rudimentary feature importance of the dataset to remove
 # parameters which have little impact on the target variable.
@@ -360,7 +361,7 @@ def make_windowed_datasets():
 if __name__ == "__main__":
     experiment_encoding()
     checking_missing_values()
-    categorical_encoding()
+    #categorical_encoding()
     drop_features(top_k=25)
     normalize_filtered()
     make_windowed_datasets()
