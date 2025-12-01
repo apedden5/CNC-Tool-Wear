@@ -107,7 +107,146 @@ def build_tcn_model(input_shape, filters=64, kernel_size=3, dropout=0.3, lr=1e-3
 
     return model
 
+def train_baseline_tcn(X_train, y_train, X_val, y_val,
+                       filters=64, kernel_size=3, dropout=0.3, lr=1e-3,
+                       batch_size=64, max_epochs=25):
 
+    input_shape = X_train.shape[1:]
+
+    model = build_tcn_model(
+        input_shape=input_shape,
+        filters=filters,
+        kernel_size=kernel_size,
+        dropout=dropout,
+        lr=lr
+    )
+
+    es = callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=3,
+        restore_best_weights=True
+    )
+
+    classes = np.unique(y_train)
+    weights = compute_class_weight(
+        class_weight='balanced',
+        classes=classes,
+        y=y_train
+    )
+    class_weights = dict(zip(classes, weights))
+
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        batch_size=batch_size,
+        epochs=max_epochs,
+        class_weight=class_weights,
+        callbacks=[es],
+        verbose=0
+    )
+
+    return model, history
+
+# ---------------------------------------------------------
+#   RUN BASELINE TCN (for comparison in notebook)
+# ---------------------------------------------------------
+def run_baseline_tcn(X_train, y_train, X_val, y_val, X_test, y_test,
+                     filters=64, kernel_size=3, dropout=0.3, lr=1e-3,
+                     batch_size=64, max_epochs=25):
+
+    print("\n=== Training Baseline TCN ===")
+
+    model, history = train_baseline_tcn(
+        X_train, y_train, X_val, y_val,
+        filters=filters,
+        kernel_size=kernel_size,
+        dropout=dropout,
+        lr=lr,
+        batch_size=batch_size,
+        max_epochs=max_epochs
+    )
+
+    # ---------- threshold search on validation ----------
+    val_probs = model.predict(X_val).ravel()
+    test_probs = model.predict(X_test).ravel()
+
+    from sklearn.metrics import precision_recall_curve
+    precisions, recalls, thresholds = precision_recall_curve(y_val, val_probs)
+    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx]
+
+    # ---------- test predictions ----------
+    test_preds = (test_probs >= best_threshold).astype("int32")
+
+    loss, acc, auc = model.evaluate(X_test, y_test, verbose=0)
+
+    prec = precision_score(y_test, test_preds)
+    rec = recall_score(y_test, test_preds)
+    f1 = f1_score(y_test, test_preds)
+    cm = confusion_matrix(y_test, test_preds)
+
+    print("\n=== Baseline Model Results ===")
+    print(f"Best threshold: {best_threshold:.4f}")
+    print(f"Accuracy:       {acc:.4f}")
+    print(f"Precision:      {prec:.4f}")
+    print(f"Recall:         {rec:.4f}")
+    print(f"F1-score:       {f1:.4f}")
+    print("Confusion matrix:")
+    print(cm)
+
+    return {
+        "model": model,
+        "history": history.history,
+        "threshold": best_threshold,
+        "metrics": {
+            "accuracy": acc,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "confusion_matrix": cm
+        }
+    }
+
+
+def evaluate_model(model, X_val, y_val, X_test, y_test):
+    # VALIDATION threshold search
+    val_probs = model.predict(X_val).ravel()
+    test_probs = model.predict(X_test).ravel()
+
+    from sklearn.metrics import precision_recall_curve
+
+    precisions, recalls, thresholds = precision_recall_curve(y_val, val_probs)
+    f1_scores = 2*(precisions*recalls)/(precisions+recalls+1e-8)
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx]
+
+    # Test predictions using chosen threshold
+    test_preds = (test_probs >= best_threshold).astype("int32")
+
+    loss, acc, auc = model.evaluate(X_test, y_test, verbose=0)
+
+    print(f"\n=== Evaluation Results ===")
+    print(f"Optimal threshold: {best_threshold:.4f}")
+    print(f"Test Accuracy:     {acc:.4f}")
+    print(f"Test AUC:          {auc:.4f}")
+    print(f"Precision:         {precision_score(y_test, test_preds):.4f}")
+    print(f"Recall:            {recall_score(y_test, test_preds):.4f}")
+    print(f"F1-score:          {f1_score(y_test, test_preds):.4f}")
+
+    print("\nClassification Report:")
+    print(classification_report(y_test, test_preds, digits=4))
+
+    print("Confusion matrix:")
+    print(confusion_matrix(y_test, test_preds))
+
+    return {
+        "threshold": best_threshold,
+        "preds": test_preds,
+        "probs": test_probs,
+        "acc": acc,
+        "auc": auc
+    }
 
 # ---------------------------------------------------------
 #   HYPERPARAM SEARCH
@@ -204,57 +343,10 @@ def run_tcn_experiment(train_path, val_path, test_path, max_epochs=25):
         X_train, y_train, X_val, y_val, max_epochs=max_epochs
     )
 
-    print("\nEvaluating best TCN on TEST set...")
-    test_probs = best_model.predict(X_test).ravel()
-
-    # -----------------------------------------------------
-    # 1. FIND OPTIMAL THRESHOLD USING F1
-    # -----------------------------------------------------
-    from sklearn.metrics import precision_recall_curve
-    
-    precisions, recalls, thresholds = precision_recall_curve(y_test, test_probs)
-    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-8)
-    best_idx = np.argmax(f1_scores)
-    best_threshold = thresholds[best_idx]
-
-    print(f"\n=== Optimal threshold search ===")
-    print(f"Best threshold for F1: {best_threshold:.4f}")
-    print(f"Max F1 at this threshold: {f1_scores[best_idx]:.4f}")
-
-    # -----------------------------------------------------
-    # 2. PREDICT USING OPTIMAL THRESHOLD
-    # -----------------------------------------------------
-    test_preds = (test_probs >= best_threshold).astype("int32")
-
-    # -----------------------------------------------------
-    # 3. MODEL EVALUATION
-    # -----------------------------------------------------
-    loss, acc, auc = best_model.evaluate(X_test, y_test, verbose=0)
-    print("\nBase Test Metrics (threshold-free):")
-    print(f"Test loss: {loss:.4f}")
-    print(f"Test accuracy (raw): {acc:.4f}")
-    print(f"Test AUC: {auc:.4f}")
-
-    print("\nMetrics Using Optimized Threshold:")
-    prec = precision_score(y_test, test_preds)
-    rec = recall_score(y_test, test_preds)
-    f1 = f1_score(y_test, test_preds)
-
-    print(f"Precision: {prec:.4f}")
-    print(f"Recall:    {rec:.4f}")
-    print(f"F1-score:  {f1:.4f}")
-
-    print("\nClassification report:")
-    print(classification_report(y_test, test_preds, digits=4))
-
-    print("Confusion matrix:")
-    print(confusion_matrix(y_test, test_preds))
-
     return {
-        "model": best_model,
+        "best_model": best_model,
         "best_config": best_config,
-        "best_threshold": best_threshold,
-        "history": history_per_config,
+        "history_per_config": history_per_config,
         "X_train": X_train,
         "y_train": y_train,
         "X_val": X_val,
