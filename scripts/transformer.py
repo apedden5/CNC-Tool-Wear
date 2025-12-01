@@ -1,305 +1,308 @@
-import itertools
+# transformer.py  –  Keras Transformer with keras-tuner HPO
+
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # avoid OpenMP clash on Windows
+
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
-from torch import nn
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    average_precision_score,
+import matplotlib.pyplot as plt
+
+import keras
+from keras.layers import (
+    Layer,
+    MultiHeadAttention,
+    LayerNormalization,
+    Dropout,
+    Conv1D,
+    Input,
+    Flatten,
+    Dense,
 )
+from keras.models import Model
+from keras.callbacks import EarlyStopping
 
-# ------------------------
-# Config (fixed)
-# ------------------------
-WINDOW_SIZE = 10        # must match preprocessing
-BATCH_SIZE = 64
-MAX_EPOCHS = 15
-EARLY_STOP_PATIENCE = 3
-MAX_GRAD_NORM = 1.0
+import keras_tuner as kt
+from sklearn.metrics import f1_score, confusion_matrix, roc_curve, auc
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if (PROJECT_ROOT / "data" / "data_windowed_csv").exists():
-    DATA_ROOT = PROJECT_ROOT / "data"
-else:
-    DATA_ROOT = PROJECT_ROOT
-WINDOWED_DIR = DATA_ROOT / "data_windowed_csv"
+# ------------------------ Global config ------------------------
 
-# ------------------------
-# Dataset
-# ------------------------
-class ToolWearWindowDataset(Dataset):
-    def __init__(self, csv_path: Path, window_size: int):
-        self.df = pd.read_csv(csv_path)
-        self.window_size = window_size
+TARGET_COL   = "successful_part"
+WINDOW_SIZE  = 10
+NUM_CLASSES  = 2
 
-        self.labels = self.df["tool_condition"].values.astype(np.float32)
+BATCH_SIZE   = 64
+EPOCHS_TUNE  = 40      # per trial
+EPOCHS_FINAL = 60      # final best model
 
-        drop_cols = ["tool_condition", "experiment_id"]
-        for c in drop_cols:
-            if c in self.df.columns:
-                self.df = self.df.drop(columns=c)
+# ------------------------ Paths ------------------------
 
-        X = self.df.values.astype(np.float32)
-        total_features = X.shape[1]
-        assert total_features % window_size == 0, (
-            f"Feature count {total_features} not divisible by window size {window_size}"
-        )
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
-        self.n_features = total_features // window_size
-        self.X = X.reshape(-1, window_size, self.n_features)
+BASE_DIR = _project_root()
+WIN_DIR  = BASE_DIR / "data" / "data_windowed_csv"
 
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        x = self.X[idx]
-        y = self.labels[idx]
-        return torch.from_numpy(x), torch.tensor(y)
+TRAIN_CSV = WIN_DIR / f"train_windows_w{WINDOW_SIZE}.csv"
+VAL_CSV   = WIN_DIR / f"val_windows_w{WINDOW_SIZE}.csv"
+TEST_CSV  = WIN_DIR / f"test_windows_w{WINDOW_SIZE}.csv"
 
 
-# ------------------------
-# Model
-# ------------------------
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))
+# ------------------------ Data loading ------------------------
 
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
+def load_windowed_csv(csv_path: Path):
+    """
+    Load a windowed CSV and return:
+      X: (N, W, F) float32
+      y: (N,) float32 (0 / 1)
+    """
+    df = pd.read_csv(csv_path)
 
+    if TARGET_COL not in df.columns:
+        raise ValueError(f"{TARGET_COL} not in {csv_path}")
 
-class ToolWearTransformer(nn.Module):
-    def __init__(self, in_features, d_model, nhead, num_layers, dropout):
-        super().__init__()
-        self.input_proj = nn.Linear(in_features, d_model)
+    non_feat = {TARGET_COL, "experiment_id"}
+    flat_cols = [c for c in df.columns if c not in non_feat]
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.pos_enc = PositionalEncoding(d_model)
+    base_feats   = sorted({c.rsplit("_t", 1)[0] for c in flat_cols})
+    time_indices = sorted({int(c.rsplit("_t", 1)[1]) for c in flat_cols})
 
-        self.cls_head = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
+    if len(time_indices) != WINDOW_SIZE:
+        raise ValueError(f"Expected {WINDOW_SIZE} timesteps, found {len(time_indices)}")
 
-    def forward(self, x):
-        x = self.input_proj(x)
-        x = self.pos_enc(x)
-        x = self.encoder(x)
-        x = x[:, -1, :]
-        return self.cls_head(x).squeeze(-1)
+    X_list = []
+    for t in time_indices:
+        cols_t = [f"{feat}_t{t}" for feat in base_feats]
+        X_t = df[cols_t].values.astype("float32")
+        X_list.append(X_t)
+
+    X = np.stack(X_list, axis=1)  # (N, W, F)
+    y = df[TARGET_COL].values.astype("float32")
+
+    return X, y
 
 
-# ------------------------
-# Training helpers
-# ------------------------
-def train_one_epoch(model, loader, criterion, optimizer, device):
-    model.train()
-    running = 0.0
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
+# ------------------------ Transformer block ------------------------
 
-        optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
-        optimizer.step()
+# time_steps / num_features are needed inside the block just like in the lab
+X_train_tmp, _ = load_windowed_csv(TRAIN_CSV)
+time_steps   = X_train_tmp.shape[1]
+num_features = X_train_tmp.shape[2]
+num_classes  = NUM_CLASSES
 
-        running += loss.item() * x.size(0)
-
-    return running / len(loader.dataset)
+print("time_steps :", time_steps)
+print("num_features:", num_features)
+print("num_classes :", num_classes)
 
 
-def eval_one_epoch(model, loader, criterion, device):
-    model.eval()
-    running = 0.0
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            y = y.to(device)
+class TransformerEncoderBlock(Layer):
+    """
+    Same structure as the course lab:
 
-            logits = model(x)
-            loss = criterion(logits, y)
-            running += loss.item() * x.size(0)
+      attn = MultiHeadAttention(...)
+      out1 = LayerNorm(x + Dropout(attn(x)))
+      ffn  = Conv1D(1x1) -> ReLU -> Conv1D(1x1)
+      out2 = LayerNorm(out1 + Dropout(ffn(out1)))
+    """
+    def __init__(self, num_heads, ff_dim, rate=0.1, **kwargs):
+        super().__init__(**kwargs)
+        # Multi-head self-attention
+        self.att = MultiHeadAttention(num_heads=num_heads, key_dim=1)
 
-    return running / len(loader.dataset)
+        # Feed-forward via Conv1D(1x1)
+        self.conv1 = Conv1D(filters=ff_dim, kernel_size=1, activation="relu")
+        self.conv2 = Conv1D(filters=num_features, kernel_size=1)
+
+        # LayerNorm + Dropout
+        self.layernorm1 = LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = LayerNormalization(epsilon=1e-6)
+        self.dropout1   = Dropout(rate)
+        self.dropout2   = Dropout(rate)
+
+    def call(self, inputs, training=False):
+        # --- First residual: attention ---
+        attn_output = self.att(inputs, inputs)                 # self-attention
+        attn_output = self.dropout1(attn_output, training=training)
+        out1 = self.layernorm1(inputs + attn_output)           # residual + norm
+
+        # --- Second residual: feed-forward via Conv1D(1x1) ---
+        ffn_output = self.conv1(out1)
+        ffn_output = self.conv2(ffn_output)
+        ffn_output = self.dropout2(ffn_output, training=training)
+        return self.layernorm2(out1 + ffn_output)              # residual + norm
 
 
-def eval_auc(model, loader, device):
-    model.eval()
-    all_y, all_p = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            logits = model(x).cpu().numpy()
-            probs = 1 / (1 + np.exp(-logits))
-            all_y.append(y.numpy())
-            all_p.append(probs)
-    y_true = np.concatenate(all_y)
-    y_prob = np.concatenate(all_p)
-    try:
-        auc = roc_auc_score(y_true, y_prob)
-    except ValueError:
-        auc = float("nan")
-    return auc, y_true, y_prob
+# ------------------------ keras-tuner model builder ------------------------
 
+def build_transformer_model(hp: kt.HyperParameters) -> Model:
+    """
+    Hypermodel used by keras-tuner GridSearch.
+    Keeps architecture very close to the lab, but tunes a few key knobs:
+      - num_heads   ∈ {2, 4}
+      - ff_dim      ∈ {64, 128}
+      - num_blocks  ∈ {1, 2, 3}
+      - dense_units ∈ {32, 64, 96, 128}
+      - dropout_rate∈ {0.1, 0.2, 0.3}
+      - lr          ∈ {1e-3, 5e-4, 2e-4}
+    """
+    num_heads = hp.Choice("num_heads", [2, 4])
+    ff_dim    = hp.Choice("ff_dim", [64, 128])
+    num_blocks = hp.Choice("num_blocks", [1, 2, 3])
+    dense_units = hp.Int("dense_units", min_value=32, max_value=128, step=32)
+    dropout_rate = hp.Choice("dropout_rate", [0.1, 0.2, 0.3])
+    lr = hp.Choice("lr", [1e-3, 5e-4, 2e-4])
 
-# ------------------------
-# HPO: try many configs
-# ------------------------
-def run_single_config(config, train_loader, val_loader, in_features, device):
-    d_model      = config["d_model"]
-    nhead        = config["nhead"]
-    num_layers   = config["num_layers"]
-    dropout      = config["dropout"]
-    lr           = config["lr"]
-    weight_decay = config["weight_decay"]
+    inputs = Input(shape=(time_steps, num_features))
+    x = inputs
 
-    model = ToolWearTransformer(
-        in_features=in_features,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dropout=dropout,
-    ).to(device)
+    for _ in range(num_blocks):
+        x = TransformerEncoderBlock(
+            num_heads=num_heads,
+            ff_dim=ff_dim,
+            rate=dropout_rate,
+        )(x)
 
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=lr, weight_decay=weight_decay
+    x = Flatten()(x)
+    x = Dense(dense_units, activation="relu")(x)
+    x = Dropout(dropout_rate)(x)
+    outputs = Dense(1, activation="sigmoid")(x)  # binary classification
+
+    model = Model(inputs, outputs)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
     )
+    return model
 
-    best_val_loss = float("inf")
-    best_state = None
-    patience = 0
 
-    for epoch in range(1, MAX_EPOCHS + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss   = eval_one_epoch(model, val_loader, criterion, device)
-
-        if val_loss < best_val_loss - 1e-4:
-            best_val_loss = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            patience = 0
-        else:
-            patience += 1
-            if patience >= EARLY_STOP_PATIENCE:
-                break
-
-    # restore best weights
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    val_auc, _, _ = eval_auc(model, val_loader, device)
-    return best_val_loss, val_auc, model
-
+# ------------------------ Main script ------------------------
 
 def main():
-    # ---- data ----
-    train_csv = WINDOWED_DIR / f"train_windows_w{WINDOW_SIZE}.csv"
-    val_csv   = WINDOWED_DIR / f"val_windows_w{WINDOW_SIZE}.csv"
+    # ---- Load data ----
+    X_train, y_train = load_windowed_csv(TRAIN_CSV)
+    X_val,   y_val   = load_windowed_csv(VAL_CSV)
+    X_test,  y_test  = load_windowed_csv(TEST_CSV)
 
-    train_ds = ToolWearWindowDataset(train_csv, WINDOW_SIZE)
-    val_ds   = ToolWearWindowDataset(val_csv, WINDOW_SIZE)
+    print("X_train:", X_train.shape, "X_val:", X_val.shape, "X_test:", X_test.shape)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    # ---- keras-tuner GridSearch ----
+    keras.backend.clear_session()
 
-    in_features = train_ds.n_features
-    print(f"Window size: {WINDOW_SIZE}, features/timestep: {in_features}")
+    tuner = kt.GridSearch(
+        hypermodel=build_transformer_model,
+        objective="val_accuracy",
+        max_trials=25,                # small but useful search space
+        directory="transformer_hpo",
+        project_name="transformer_search",
+        overwrite=True,
+    )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device)
+    tuner.search(
+        X_train, y_train,
+        epochs=EPOCHS_TUNE,
+        batch_size=BATCH_SIZE,
+        validation_data=(X_val, y_val),
+        verbose=1,
+    )
 
-    # ---- hyperparameter grid ----
-    grid = {
-        "d_model":      [16, 32, 64],
-        "nhead":        [1, 2],
-        "num_layers":   [1, 2],
-        "dropout":      [0.2, 0.5],
-        "lr":           [1e-4, 3e-4],
-        "weight_decay": [1e-4, 1e-3],
-    }
+    best_hp = tuner.get_best_hyperparameters(1)[0]
+    print("\nBest hyperparameters:")
+    for name in ["num_heads", "ff_dim", "num_blocks",
+                 "dense_units", "dropout_rate", "lr"]:
+        print(f"  {name}: {best_hp.get(name)}")
 
-    keys = list(grid.keys())
-    configs = [
-        dict(zip(keys, values))
-        for values in itertools.product(*(grid[k] for k in keys))
-    ]
+    # ---- Build and train final model with best HPs ----
+    best_model = tuner.hypermodel.build(best_hp)
 
-    print(f"\nTotal configs to try: {len(configs)}\n")
+    es = EarlyStopping(
+        monitor="val_loss",
+        patience=10,
+        restore_best_weights=True,
+        verbose=1,
+    )
 
-    best_auc = -1.0
-    best_cfg = None
-    best_model = None
-    best_loss = None
+    history = best_model.fit(
+        X_train, y_train,
+        epochs=EPOCHS_FINAL,
+        batch_size=BATCH_SIZE,
+        validation_data=(X_val, y_val),
+        callbacks=[es],
+        verbose=1,
+    )
 
-    for i, cfg in enumerate(configs, start=1):
-        print(f"=== Config {i}/{len(configs)} ===")
-        print(cfg)
+    # ---- Evaluate on test set ----
+    test_loss, test_acc = best_model.evaluate(X_test, y_test, verbose=0)
 
-        val_loss, val_auc, model = run_single_config(
-            cfg, train_loader, val_loader, in_features, device
-        )
-        print(f" -> Val loss: {val_loss:.4f}, Val AUC: {val_auc:.4f}\n")
-
-        if np.isnan(val_auc):
-            continue
-        if val_auc > best_auc:
-            best_auc = val_auc
-            best_cfg = cfg
-            best_model = model
-            best_loss = val_loss
-
-    print("\n==========================================")
-    print(" BEST CONFIG (by validation ROC AUC)")
-    print("==========================================")
-    print(best_cfg)
-    print(f"Best val AUC : {best_auc:.4f}")
-    print(f"Best val loss: {best_loss:.4f}")
-
-    # ---- full metrics for best model ----
-    _, y_true, y_prob = eval_auc(best_model, val_loader, device)
+    y_prob = best_model.predict(X_test, verbose=0).reshape(-1)
     y_pred = (y_prob >= 0.5).astype(int)
 
-    print("\nClassification Report (best config):")
-    print(classification_report(y_true, y_pred, digits=3))
+    f1 = f1_score(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    roc_auc = auc(fpr, tpr)
 
-    print("Confusion Matrix:")
-    print(confusion_matrix(y_true, y_pred))
+    print(f"\nTest loss: {test_loss:.4f}, Test accuracy: {test_acc:.4f}")
+    print(f"F1-score: {f1:.4f}")
+    print("Confusion matrix:")
+    print(cm)
+    print(f"ROC AUC: {roc_auc:.4f}")
 
-    try:
-        print("PR AUC:", average_precision_score(y_true, y_prob))
-    except ValueError:
-        print("PR AUC: n/a")
+    # ---- Plots ----
+    epochs = range(1, len(history.history["loss"]) + 1)
 
-    # save best model
-    model_path = PROJECT_ROOT / "models" / "transformer_toolwear_best_hpo.pt"
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(best_model.state_dict(), model_path)
-    print("\nSaved best HPO model to:", model_path)
+    # Loss curve
+    plt.figure()
+    plt.plot(epochs, history.history["loss"], label="Train Loss")
+    plt.plot(epochs, history.history["val_loss"], label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Transformer – Successful Part (Train vs Val Loss)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(BASE_DIR / "transformer_keras_loss.png", dpi=200)
+    plt.show()
+
+    # Confusion matrix
+    plt.figure()
+    im = plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix (Test Set)")
+    plt.colorbar(im)
+    tick_marks = np.arange(NUM_CLASSES)
+    plt.xticks(tick_marks, [0, 1])
+    plt.yticks(tick_marks, [0, 1])
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+    thresh = cm.max() / 2.0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(
+                j, i, format(cm[i, j], "d"),
+                ha="center", va="center",
+                color="white" if cm[i, j] > thresh else "black",
+            )
+    plt.tight_layout()
+    plt.savefig(BASE_DIR / "transformer_keras_confusion.png", dpi=200)
+    plt.show()
+
+    # ROC curve
+    plt.figure()
+    plt.plot(fpr, tpr, label=f"ROC curve (AUC = {roc_auc:.3f})")
+    plt.plot([0, 1], [0, 1], "k--", label="Random")
+    plt.xlabel("False Positive Rate (FPR)")
+    plt.ylabel("True Positive Rate (TPR)")
+    plt.title("ROC Curve – Successful Part (Test Set)")
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(BASE_DIR / "transformer_keras_roc.png", dpi=200)
+    plt.show()
+
+    # Save final model
+    best_model.save(BASE_DIR / "transformer_keras_best.h5")
+    print(f"Saved final Keras model to {BASE_DIR / 'transformer_keras_best.h5'}")
 
 
 if __name__ == "__main__":

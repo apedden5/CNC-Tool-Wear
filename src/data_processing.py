@@ -1,4 +1,3 @@
-import os
 import shutil
 from pathlib import Path
 import numpy as np
@@ -22,26 +21,21 @@ def load_experiments():
 
     return experiments, dftrain
 
-# ------------------------
-# Global config
-# ------------------------
+# Global Variables
 WINDOW_SIZE = 10
-STRIDE      = 1  # step size for sliding windows
+STRIDE      = 1
 
-# experiment splits (adjust if you change them later)
-TRAIN_EXPS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 18]
-VAL_EXPS   = [11, 13]
-TEST_EXPS  = [12, 14, 16, 17]
+# Experiment splits to make the training, testing, and validation sets
+TRAIN_EXPS = [1, 2, 3, 11, 12, 13, 4, 5, 6, 7]
+VAL_EXPS   = [14, 15, 8, 9]
+TEST_EXPS  = [17, 18, 10, 16]
 
+# Global definition for our target variable.
 TARGET_COL = "successful_part"
 
-
-# ------------------------
-# Helpers
-# ------------------------
+# Clears any past data files before running pre-processing
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
 
 def _clear_dir(path: Path):
     if path.exists():
@@ -53,9 +47,7 @@ def _clear_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-# ----------------------------------------------------
-# 1) Combine experiment data with metadata + drop cols
-# ----------------------------------------------------
+# A method to combine experiment data with metadata + drop cols
 def experiment_encoding():
     base_dir = _project_root()
 
@@ -66,7 +58,7 @@ def experiment_encoding():
     meta = pd.read_csv(data_dir / "train.csv")
     meta = meta.rename(columns={"No": "experiment_id"})
 
-    # columns to remove from raw experiments
+    # Remove these columns from the experiment data as they are seen as unnescasary information.
     drop_cols = [
         "M1_CURRENT_PROGRAM_NUMBER",
         "M1_sequence_number",
@@ -78,13 +70,13 @@ def experiment_encoding():
         exp_file = data_dir / f"experiment_{i:02d}.csv"
         df = pd.read_csv(exp_file)
 
-        # drop unwanted columns
+        # Removing the unwanted columns specified above.
         df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 
-        # grab metadata row for this experiment
+        # Specifying the data from the target.csv that corresponds with the experiment.csv
         row = meta.loc[meta["experiment_id"] == i].iloc[0]
 
-        # ---------- NEW TARGET: successful_part ----------
+        # Data Engineering for the target variable "successful_part"
         # successful_part = 1 if machining_finalized == yes AND passed_visual_inspection == yes
         # otherwise 0 (includes unfinished or failed visual inspection)
         passed   = str(row["passed_visual_inspection"]).lower()
@@ -97,11 +89,11 @@ def experiment_encoding():
 
         df[TARGET_COL] = label
 
-        # keep tool_condition as a binary feature (worn=1, unworn=0)
+        # Converting "tool_worn" to be binary for the model to train.
         tc = str(row["tool_condition"]).lower()
         df["tool_condition"] = 1 if tc == "worn" else 0
 
-        # metadata features
+        # Adding time_step and experiment_id to each row of the experiment.csv
         df["experiment_id"] = i
         df["time_step"] = np.arange(len(df), dtype=int)
 
@@ -111,9 +103,9 @@ def experiment_encoding():
     print("All experiments encoded with successful_part and tool_condition.")
 
 
-# ----------------------------------------------------
-# 2) Check missing values (sanity check only)
-# ----------------------------------------------------
+# A method to ensure there are no missing values in the dataset
+# In this case we already knew there were no missing values, this simply checks and confirms
+# this assumption prior to completing more pre-processing of the dataset.
 def checking_missing_values():
     base_dir = _project_root()
     data_dir = base_dir / "data" / "data_id"
@@ -127,9 +119,8 @@ def checking_missing_values():
     print(f"\nTotal missing values across all experiments (data_id): {total_missing_all}\n")
 
 
-# ----------------------------------------------------
-# 3) Ensure target is int, save cleaned CSVs
-# ----------------------------------------------------
+# This method ensures that the binary categorical variables are stored as integers for the training models.
+# If they are not, we convert them to be simple binary.
 def categorical_encoding():
     base_dir = _project_root()
 
@@ -141,10 +132,10 @@ def categorical_encoding():
         exp_file = data_dir / f"experiment_{i:02d}_idd.csv"
         df = pd.read_csv(exp_file)
 
-        # ensure successful_part is int 0/1
+        # Ensure successful_part is int 0/1
         df[TARGET_COL] = df[TARGET_COL].astype(int)
 
-        # ensure tool_condition is int 0/1
+        # Ensure tool_condition is int 0/1
         df["tool_condition"] = df["tool_condition"].astype(int)
 
         out_name = out_dir / f"experiment_{i:02d}_cleaned.csv"
@@ -152,14 +143,14 @@ def categorical_encoding():
 
     print("All experiments cleaned and encoded (successful_part, tool_condition).")
 
-
-# ----------------------------------------------------
-# 4) Feature importance with LightGBM (on TRAIN_EXPS)
-# ----------------------------------------------------
+# A method to complete rudimentary feature importance of the dataset to remove
+# parameters which have little impact on the target variable.
 def compute_feature_importance():
     base_dir    = _project_root()
     cleaned_dir = base_dir / "data" / "data_cleaned"
 
+    # To determine feature importance, we concatenate all training experiments into one df
+    # to determine their effect.
     dfs = []
     for i in TRAIN_EXPS:
         f = cleaned_dir / f"experiment_{i:02d}_cleaned.csv"
@@ -168,8 +159,9 @@ def compute_feature_importance():
 
     train_all = pd.concat(dfs, axis=0, ignore_index=True)
 
-    y = train_all[TARGET_COL]
+    y = train_all[TARGET_COL]   # defining the target variable (successful_part)
 
+    # dropping any features which may leak info regarding the outcome of the experiment.
     drop_cols = [
         TARGET_COL,
         "experiment_id",
@@ -181,8 +173,9 @@ def compute_feature_importance():
     feature_cols = [c for c in train_all.columns if c not in drop_cols]
     X = train_all[feature_cols]
 
-    lgb_train = lgb.Dataset(X, label=y)
+    lgb_train = lgb.Dataset(X, label=y)     # using lightgbm to quickly determine which features are important, we then train the models based on this outcome.
 
+    # Defining the parameters for the lgb model.
     params = {
         "objective": "binary",
         "metric": "binary_logloss",
@@ -195,9 +188,12 @@ def compute_feature_importance():
         "verbose": -1,
     }
 
+    # Training the lgb model to determine feature importance.
     model = lgb.train(params, lgb_train, num_boost_round=300)
 
     importances = model.feature_importance()
+
+    # Returns a dataframe of important features in order from most to least to be used for later pre-processing.
     feat_imp = (
         pd.DataFrame({"feature": feature_cols, "importance": importances})
         .sort_values("importance", ascending=False)
@@ -206,22 +202,21 @@ def compute_feature_importance():
 
     return feat_imp
 
-
-# ----------------------------------------------------
-# 5) Keep only top-K features
-# ----------------------------------------------------
+# A method to keep only the top k features according to the feature selection method (compute_feature_importance)
 def drop_features(top_k: int = 25):
     base_dir     = _project_root()
     cleaned_dir  = base_dir / "data" / "data_cleaned"
     filtered_dir = base_dir / "data" / "data_filtered"
     _clear_dir(filtered_dir)
 
+    # First call the method compute_feature_importance to determine the top features of the dataset.
     feat_imp = compute_feature_importance()
     top_features = feat_imp.head(top_k)["feature"].tolist()
 
-    # always keep target + metadata columns if present
+    # Keep the top features as well as the metadata from train.csv for later identification of rows and time steps.
     keep_cols = top_features + [TARGET_COL, "experiment_id", "time_ms", "time_step"]
 
+    # For each experiment, reduce the dolumns to only the important features and metadata.
     for i in range(1, 19):
         f = cleaned_dir / f"experiment_{i:02d}_cleaned.csv"
         df = pd.read_csv(f)
@@ -233,44 +228,44 @@ def drop_features(top_k: int = 25):
 
     print(f"All experiments reduced to top {top_k} features (plus target/metadata).")
 
-
-# ----------------------------------------------------
-# 6) Normalize filtered features (fit scaler on TRAIN_EXPS)
-# ----------------------------------------------------
+# A method to normalize the dataset according to a normalization based on only the training data (no data leakage with validation or test).
 def normalize_filtered():
     base_dir     = _project_root()
     filtered_dir = base_dir / "data" / "data_filtered"
     norm_dir     = base_dir / "data" / "data_normalized"
     _clear_dir(norm_dir)
 
-    # collect training experiments
+    # Collect all training experiments in one dataframe to compute standard scaler.
     train_dfs = []
     for i in TRAIN_EXPS:
         f = filtered_dir / f"experiment_{i:02d}_filtered.csv"
         df = pd.read_csv(f)
         train_dfs.append(df)
 
-    # find common columns across train exps
+    # Intersect all collumns from the training experiements (combine datasets)
     common_cols = set(train_dfs[0].columns)
     for df in train_dfs[1:]:
         common_cols &= set(df.columns)
 
+    # Remove columns which do not need to be normalized (categorical/time specific)
     drop_cols = {TARGET_COL, "experiment_id", "time_ms", "time_step"}
     feature_cols = [c for c in common_cols if c not in drop_cols]
 
     train_all = pd.concat([df[feature_cols] for df in train_dfs],
                           axis=0, ignore_index=True)
 
+    # Fit standard scaler to ONLY TRAINING data feature collumns.
     scaler = StandardScaler()
     scaler.fit(train_all[feature_cols])
 
-    # apply scaler to ALL experiments
+    # Apply the scaler to all experiments including validation and test sets.
     for i in range(1, 19):
         f = filtered_dir / f"experiment_{i:02d}_filtered.csv"
         df = pd.read_csv(f)
 
         df_scaled = df.copy()
-        # only scale columns that we actually fitted
+
+        # Only applies scale to features we are going to be using for training (based on feature importance).
         cols_to_scale = [c for c in feature_cols if c in df.columns]
         df_scaled[cols_to_scale] = scaler.transform(df[cols_to_scale])
 
@@ -280,17 +275,16 @@ def normalize_filtered():
     print("All experiments normalized using training experiments' stats.")
 
 
-# ----------------------------------------------------
-# 7) Create windowed CSV datasets (train/val/test)
-# ----------------------------------------------------
+# A method to create windowed CSV datasets for each experiment.
 def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_col=TARGET_COL):
     rows = []
 
+    # For each experiment, window the timesteps.
     for i in exp_ids:
         f = norm_dir / f"experiment_{i:02d}_normalized.csv"
         df = pd.read_csv(f)
 
-        # sort by time if present
+        # Ensure the time steps are still in order (important for time series training).
         if "time_ms" in df.columns:
             df = df.sort_values("time_ms")
 
@@ -298,14 +292,16 @@ def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_co
         labels = df[target_col].values
         n = len(df)
 
-        # column names for flattened window
+        # Column names for flattened window
         win_feature_cols = [
             f"{feat}_t{t}"
             for t in range(window_size)
             for feat in feature_cols
         ]
 
-        # sliding windows with stride
+        # Creates sliding window frames across the entire experiment appending the 
+        # target label to the end of every window alongside experiment_id. 
+        # experiment_id is added to make sure there is no windows that cross between experiements. 
         for start in range(0, n - window_size + 1, STRIDE):
             end = start + window_size
             window_feats = feats[start:end, :]     # (W, F)
@@ -318,34 +314,39 @@ def _windows_to_csv_rows(exp_ids, norm_dir, window_size, feature_cols, target_co
 
     return pd.DataFrame(rows)
 
-
+# A method to combine the windowed experiments into single train, test, and validation datasets.
 def make_windowed_datasets():
     base_dir = _project_root()
     norm_dir = base_dir / "data" / "data_normalized"
     out_dir  = base_dir / "data" / "data_windowed_csv"
     _clear_dir(out_dir)
 
-    # infer common feature columns across ALL normalized experiments
+    # Loading all normalized experiments to determine the intersecting features (ones defined as having high importance)
     dfs = []
     for i in range(1, 19):
         f = norm_dir / f"experiment_{i:02d}_normalized.csv"
         dfs.append(pd.read_csv(f))
 
+    # Computing the intersection of these experiements to determine the common collumns that will be in our final datasets.
     common_cols = set(dfs[0].columns)
     for df in dfs[1:]:
         common_cols &= set(df.columns)
 
+    # Removing labels and metadata from the feature set.
     drop_cols = {TARGET_COL, "experiment_id", "time_ms", "time_step"}
     feature_cols = [c for c in dfs[0].columns if c in common_cols and c not in drop_cols]
 
+    # Creating the windowed rows for the train, test, and validation test sets.
     train_df = _windows_to_csv_rows(TRAIN_EXPS, norm_dir, WINDOW_SIZE, feature_cols)
     val_df   = _windows_to_csv_rows(VAL_EXPS,   norm_dir, WINDOW_SIZE, feature_cols)
     test_df  = _windows_to_csv_rows(TEST_EXPS,  norm_dir, WINDOW_SIZE, feature_cols)
 
+    # Defining the output file paths for these datasets.
     train_path = out_dir / f"train_windows_w{WINDOW_SIZE}.csv"
     val_path   = out_dir / f"val_windows_w{WINDOW_SIZE}.csv"
     test_path  = out_dir / f"test_windows_w{WINDOW_SIZE}.csv"
 
+    # Saving the final windowed data to the output file paths where they will be accessed by each deep learning model.
     train_df.to_csv(train_path, index=False)
     val_df.to_csv(val_path, index=False)
     test_df.to_csv(test_path, index=False)
@@ -355,10 +356,7 @@ def make_windowed_datasets():
     print("  ", val_path)
     print("  ", test_path)
 
-
-# ----------------------------------------------------
-# Full pipeline
-# ----------------------------------------------------
+# Full pipeline to pre-process the data.
 if __name__ == "__main__":
     experiment_encoding()
     checking_missing_values()
