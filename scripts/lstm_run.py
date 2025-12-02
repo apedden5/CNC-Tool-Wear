@@ -64,10 +64,10 @@ def load_data(train_path, val_path, test_path):
     return (X_train, y_train), (X_val, y_val), (X_test, y_test)
 
 
-# =====================================
-# BASELINE MODEL
-# =====================================
 
+# BASELINE MODEL
+
+#Pick Random Parameters for Baseline LSTM
 def build_baseline_model(input_shape):
     model = models.Sequential([
         layers.Input(shape=input_shape),
@@ -76,7 +76,7 @@ def build_baseline_model(input_shape):
         layers.Dense(32, activation="relu"),
         layers.Dense(1, activation="sigmoid")
     ])
-
+    #Compile the model
     model.compile(
         optimizer=optimizers.Adam(learning_rate=5e-4),
         loss="binary_crossentropy",
@@ -84,12 +84,12 @@ def build_baseline_model(input_shape):
     )
     return model
 
-
+# Run Baseline Experiment
 def run_baseline_experiment(train_path, val_path, test_path, max_epochs=25):
     (X_train, y_train), (X_val, y_val), (X_test, y_test) = load_data(train_path, val_path, test_path)
 
     model = build_baseline_model(X_train.shape[1:])
-
+    #Get training time
     start = time.time()
     history = model.fit(
         X_train, y_train,
@@ -102,6 +102,7 @@ def run_baseline_experiment(train_path, val_path, test_path, max_epochs=25):
 
     y_pred = (model.predict(X_test).ravel() >= 0.5).astype(int)
 
+    #Print Metrics
     metrics = {
         "accuracy":  accuracy_score(y_test, y_pred),
         "precision": precision_score(y_test, y_pred),
@@ -124,10 +125,10 @@ def run_baseline_experiment(train_path, val_path, test_path, max_epochs=25):
     }
 
 
-# =====================================
-# HYPERPARAMETER OPTIMIZATION
-# =====================================
 
+# HYPERPARAMETER OPTIMIZATION
+
+# Build LSTM Model Based on HPO Parameters found froom grid search function below
 def build_lstm_model(input_shape, lstm_units, dropout, learning_rate):
     model = models.Sequential([
         layers.Input(shape=input_shape),
@@ -144,11 +145,11 @@ def build_lstm_model(input_shape, lstm_units, dropout, learning_rate):
     )
     return model
 
-
+#Grid Search for HPO used in the main training function above
 def run_hpo(X_train, y_train, X_val, y_val, max_epochs=20):
 
     grid = [
-    
+    #Chosen hyperparameter combinations for grid search
     # --- Medium Models (default size) ---
     {"lstm_units": 64,  "dropout": 0.0, "lr": 1e-3},
     {"lstm_units": 64,  "dropout": 0.2, "lr": 1e-3},
@@ -187,7 +188,7 @@ def run_hpo(X_train, y_train, X_val, y_val, max_epochs=20):
         )
 
         val_acc = max(history.history["val_accuracy"])
-
+        #Print best accuracy and parameters 
         if val_acc > best_acc:
             best_acc = val_acc
             best = {"params": params, "history": history.history}
@@ -195,10 +196,8 @@ def run_hpo(X_train, y_train, X_val, y_val, max_epochs=20):
     return best
 
 
-# =====================================
-# FINAL RETRAINING USING BEST HPO PARAMS
-# =====================================
 
+# FINAL RETRAINING USING BEST HPO PARAMS
 def retrain_optimized_model(X_train_full, y_train_full, X_test, best_params, max_epochs=25):
 
     model = build_lstm_model(
