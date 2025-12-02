@@ -37,11 +37,11 @@ DEFAULT_EPOCHS_FINAL = 60
 # Simple baseline hyperparameters for the transformer model, will be overridden during HPO.
 BASELINE_PARAMS = {
     "num_heads": 2,
-    "ff_dim": 64,
-    "num_blocks": 2,
-    "dense_units": 32,
-    "dropout_rate": 0.2,
-    "lr": 1e-3,
+    "ff_dim": 32,        # 64 -> 32  (smaller FF network)
+    "num_blocks": 1,     # 2  -> 1   (shallower transformer)
+    "dense_units": 32,   # keep small dense layer
+    "dropout_rate": 0.3, # 0.2 -> 0.3 (more regularization)
+    "lr": 5e-4,          # keep this; 5e-4 is fine
 }
 
 
@@ -183,7 +183,7 @@ def train_transformer(
     params: dict | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     epochs: int = DEFAULT_EPOCHS_FINAL,
-    patience: int = 10,
+    patience: int = 20,
     verbose: int = 1,
 ):
     # First, build the model according to the given params
@@ -218,12 +218,12 @@ def train_transformer(
 # A function to perform hyperparameter optimization using keras-tuner
 def _hpo_builder(hp: kt.HyperParameters, time_steps: int, num_features: int) -> Model:
     params = {
-        "num_heads":   hp.Choice("num_heads", [2, 4]),                   # number of attention heads
-        "ff_dim":      hp.Choice("ff_dim", [64, 128]),                   # feed-forward network dimension
-        "num_blocks":  hp.Choice("num_blocks", [1, 2, 3]),               # number of transformer blocks
-        "dense_units": hp.Int("dense_units", 32, 128, step=32),          # dense layer units
-        "dropout_rate": hp.Choice("dropout_rate", [0.1, 0.2, 0.3]),      # dropout rate
-        "lr":          hp.Choice("lr", [1e-3, 5e-4, 2e-4]),              # learning rate
+        "num_heads":   hp.Choice("num_heads", [2]),                  # keep fixed at 2 for now
+        "ff_dim":      hp.Choice("ff_dim", [32, 48, 64]),            # around baseline 32, not 128
+        "num_blocks":  hp.Choice("num_blocks", [1, 2]),              # 1–2 blocks, no 3
+        "dense_units": hp.Choice("dense_units", [32, 64]),           # small dense layer
+        "dropout_rate": hp.Choice("dropout_rate", [0.3, 0.4]),       # at/above baseline
+        "lr":          hp.Choice("lr", [7e-4, 5e-4, 3e-4]),          # centred on 5e-4
     }
     return build_transformer(time_steps, num_features, params)
 
