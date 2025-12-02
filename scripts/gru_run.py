@@ -139,6 +139,69 @@ def tune_gru(train_path, val_path,
 
 
 
+#
+def train_gru_optimized(train_path, val_path, best_config, epochs=40):
+   
+
+    
+    X_train, y_train, window_len, num_features = load_window_csv(train_path)
+    X_val, y_val, _, _ = load_window_csv(val_path)
+
+ 
+    lr = best_config["learning_rate"]
+    units = best_config["units"]
+    dr = best_config["dropout"]
+    bs = best_config["batch_size"]
+
+    print("\nRetraining GRU Model with Optimized Hyperparameters:")
+    print(best_config)
+
+    
+    model = Sequential([
+        Input(shape=(window_len, num_features)),
+        GRU(units, return_sequences=True),
+        Dropout(dr),
+        GRU(units // 2),
+        Dropout(dr),
+        Dense(32, activation="relu"),
+        Dense(1, activation="sigmoid")
+    ])
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(lr),
+        loss=tf.keras.losses.BinaryFocalCrossentropy(gamma=2),
+        metrics=["accuracy"]
+    )
+
+   
+    weights = class_weight.compute_class_weight(
+        class_weight="balanced",
+        classes=np.unique(y_train),
+        y=y_train
+    )
+    weights = dict(enumerate(weights))
+
+  
+    es = EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
+
+    start = time.time()
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=bs,
+        class_weight=weights,
+        callbacks=[es],
+        verbose=1
+    )
+    train_time = time.time() - start
+
+    return model, history.history, train_time, window_len, num_features
+
+
+
+
+
 
 
 

@@ -87,18 +87,18 @@ def plot_feedrate_clamp_joint_successful(df, title="Feedrate vs Clamp Pressure b
 def compare_four_group_multi_feature(data_path, features, title=None):
 
 
-    # Load all cleaned experiment files (since they contain both labels)
+   
     all_files = list(Path(data_path).glob("experiment_*_cleaned.csv"))
     dfs = [pd.read_csv(f) for f in all_files]
     df = pd.concat(dfs, ignore_index=True)
 
-    # Define groups
+   
     unworn_df = df[df["tool_condition"] == 0]
     worn_df   = df[df["tool_condition"] == 1]
     success_df = df[df["successful_part"] == 1]
     fail_df    = df[df["successful_part"] == 0]
 
-    # --- Plotting ---
+    
     n = len(features)
     cols = 2
     rows = math.ceil(n / cols)
@@ -109,7 +109,7 @@ def compare_four_group_multi_feature(data_path, features, title=None):
     for i, feature in enumerate(features):
         ax = axes[i]
 
-        # Compute means
+        
         vals = [
             unworn_df[feature].mean(),
             worn_df[feature].mean(),
@@ -125,7 +125,7 @@ def compare_four_group_multi_feature(data_path, features, title=None):
         ax.set_ylabel("Mean Value")
         ax.grid(axis="y", alpha=0.3)
 
-    # Hide unused subplots
+    
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
