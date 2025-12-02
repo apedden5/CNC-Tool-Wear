@@ -135,12 +135,6 @@ def compare_four_group_multi_feature(data_path, features, title=None):
     plt.tight_layout()
     plt.show()
 
-
-
-
-
-
-
 def plot_feature_importance(feat_imp, top_n=30):
     
     df = feat_imp.head(top_n).sort_values("importance", ascending=True)
